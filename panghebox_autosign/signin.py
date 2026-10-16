@@ -135,11 +135,25 @@ class PangHeClient:
 
 
 def parse_checkin_list(body):
-    """把 getcheckinlist 的 body 整理成 [{day, prize_id, prize_name, minutes, signed, can_sign}]"""
-    out = []
+    """整理 getcheckinlist 的 body。
+
+    前端逻辑（unsigned.js 逆向）：
+      - 今日项 = checkin_list[actvity_day_count - 1]（actvity_day_count 夹在 1~7）
+      - 已签 = item.date 字段非空（服务端不返回 can_sign，由前端按上面两条计算）
+    """
     if not isinstance(body, dict):
-        return out
+        return [], 1
     lst = body.get('checkin_list') or []
+    try:
+        day_count = int(body.get('actvity_day_count') or 1)
+    except (TypeError, ValueError):
+        day_count = 1
+    day_count = max(1, min(7, day_count))
+
+    # date 字段是否存在（决定已签判定的回退路径）
+    has_date = any(isinstance(i, dict) and 'date' in i for i in lst if isinstance(i, dict))
+
+    out = []
     for i, item in enumerate(lst, start=1):
         if not isinstance(item, dict):
             continue
@@ -152,16 +166,22 @@ def parse_checkin_list(body):
             if isinstance(s, dict) and s.get('sale_type') == 101:
                 minutes = s.get('sale_value')
                 break
+        if has_date:
+            signed = bool((item.get('date') or '').strip())
+        else:
+            signed = bool(item.get('is_sign') or item.get('signed'))
         out.append({
-            'day': item.get('date') or i,
+            'day': i,
+            'date': (item.get('date') or '').strip() or None,
+            'is_today': i == day_count,
             'prize_id': prize_id,
             'prize_name': item.get('prize_name'),
             'minutes': minutes,
-            'signed': bool(item.get('is_sign') or item.get('signed')),
-            'can_sign': bool(item.get('can_sign') or item.get('canSign')),
+            'signed': signed,
+            'can_sign': i == day_count and not signed,
             'raw': item,
         })
-    return out
+    return out, day_count
 
 
 def describe_reward(item):
@@ -185,34 +205,32 @@ def run_checkin():
     print('uid=%s uuid=%s' % (cred['uid'], (cred['uuid'] or '(空)')[:8] + '...'))
 
     body = client.get_checkin_list()
-    days = parse_checkin_list(body)
+    days, day_count = parse_checkin_list(body)
     count = (body or {}).get('checkin_count')
-    print('签到状态: 已签 %s 天，周期共 %s 天' % (count, len(days)))
+    print('签到状态: 周期第 %s 天，已签 %s 天，列表 %s 项' % (day_count, count, len(days)))
     for d in days:
-        flag = '已签' if d['signed'] else ('可签' if d['can_sign'] else '未开放')
-        print('  第%s天: %-14s [%s] prize_id=%s' % (d['day'], describe_reward(d), flag, d['prize_id']))
+        flags = []
+        if d['is_today']:
+            flags.append('今日')
+        flags.append('已签' if d['signed'] else ('可签' if d['can_sign'] else '未开放'))
+        print('  第%s天%s: %-14s [%s] prize_id=%s' % (
+            d['day'], '(%s)' % d['date'] if d['date'] else '',
+            describe_reward(d), '+'.join(flags), d['prize_id']))
 
-    signed = [d for d in days if d['signed']]
-    if signed:
+    # 与前端一致：只签 actvity_day_count 定位的今日项
+    target = next((d for d in days if d['is_today']), None)
+    if target is None:
+        print('❌ 列表里没有周期第 %s 天的奖励项。' % day_count)
+        return 1
+    if target['signed']:
         print('今日已签到，无需重复操作。')
         return 0
-
-    target = None
-    for d in days:
-        if d['can_sign'] and d['prize_id'] is not None:
-            target = d
-            break
-    if target is None:
-        # 没有 can_sign 标记时，取第一个未签的项
-        for d in days:
-            if not d['signed'] and d['prize_id'] is not None:
-                target = d
-                break
-    if target is None:
-        print('没有找到可领取的奖励项。')
+    if target['prize_id'] is None:
+        print('❌ 今日项缺少 prize_id，无法签到。')
         return 1
 
-    print('领取第%s天奖励: %s (prize_id=%s)' % (target['day'], describe_reward(target), target['prize_id']))
+    print('领取第%s天奖励: %s (prize_id=%s)' % (
+        target['day'], describe_reward(target), target['prize_id']))
     res = client.checkin_prize(target['prize_id'])
     print('签到接口响应: %s' % json.dumps(res, ensure_ascii=False)[:500])
     print('✅ 签到成功，获得 %s' % describe_reward(target))
