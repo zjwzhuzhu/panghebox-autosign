@@ -1,0 +1,45 @@
+name: panghebox-signin
+
+on:
+  schedule:
+    # 北京时间离散时隙（UTC = 北京 - 8），避开整点拥堵
+    - cron: '37 16 * * *'   # 北京 00:37 主签到
+    - cron: '21 20 * * *'   # 北京 04:21 备用
+    - cron: '43 0 * * *'    # 北京 08:43 备用
+    - cron: '12 4 * * *'    # 北京 12:12 兜底
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: panghebox-signin
+  cancel-in-progress: false
+
+jobs:
+  signin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: 平滑随机抖动（1~15 分钟）
+        run: |
+          python - <<'PY'
+          import random, time, sys
+          d = random.uniform(60, 900)
+          print('sleep %.0f s' % d, flush=True)
+          time.sleep(d)
+          PY
+
+      - name: 每日签到
+        env:
+          PANGHEBOX_CREDENTIALS: ${{ secrets.PANGHEBOX_CREDENTIALS }}
+        run: python run_signin.py
